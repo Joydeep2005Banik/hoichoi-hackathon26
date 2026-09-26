@@ -107,7 +107,7 @@ with tab_img:
 
 # ── Video tab ──────────────────────────────────────────────
 with tab_vid:
-    vid_file = st.file_uploader("Upload a master video", type=["mp4", "avi", "mov", "mkv"])
+    vid_file = st.file_uploader("Upload a master video", type=["mp4", "avi", "mov", "mkv", "webm"])
     if vid_file:
         tmp_dir = OUTPUTS_DIR / "_tmp"
         tmp_dir.mkdir(parents=True, exist_ok=True)
@@ -116,35 +116,91 @@ with tab_vid:
 
         st.video(str(tmp_vid))
 
-        sample_interval = st.slider("Analysis sample interval (frames)", 5, 30, 10)
+        # Configuration
+        col1, col2 = st.columns(2)
+        with col1:
+            sample_fps = st.slider("Analysis sample rate (FPS)", 2.0, 10.0, 4.5, 0.5)
+        with col2:
+            smoothing = st.slider("Crop smoothing window", 3, 15, 5, 2)
 
         if st.button("Generate 9:16 Reel", key="gen_vid"):
-            from src.video_pipeline import analyse_video, render_reel
+            from src.video_pipeline import analyse_video, render_reel, extract_still
 
             cache = OUTPUTS_DIR / f"{tmp_vid.stem}_analysis.json"
 
-            with st.spinner("Analysing video (face detection on proxy frames)…"):
-                samples = analyse_video(
-                    tmp_vid, sample_interval=sample_interval, cache_path=cache
-                )
+            # Analysis phase
+            progress_placeholder = st.empty()
+            with st.spinner("Analyzing video (face detection + tracking)…"):
+                progress_placeholder.info("🔍 Detecting faces on sampled frames...")
+                analysis = analyse_video(tmp_vid, sample_fps=sample_fps, cache_path=cache)
 
-            st.info(f"Analysed {len(samples)} sample points")
-            faces_detected = sum(1 for s in samples if s["n_faces"] > 0)
-            st.metric("Frames with faces", f"{faces_detected}/{len(samples)}")
+            # Show analysis summary
+            meta = analysis["metadata"]
+            st.success(
+                f"Analyzed {meta['total_frames']} frames "
+                f"({meta['duration_sec']:.1f}s @ {meta['fps']:.1f} FPS) · "
+                f"sampled at ~{meta['sample_fps']:.1f} FPS"
+            )
 
-            with st.spinner("Rendering reel…"):
-                reel_path = render_reel(tmp_vid, samples, sample_interval=sample_interval)
+            # Detection summary
+            det_summary = analysis["detections_summary"]
+            total_dets = sum(d["n_detections"] for d in det_summary)
+            frames_with_faces = sum(1 for d in det_summary if d["n_detections"] > 0)
 
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Samples analyzed", len(det_summary))
+            with col2:
+                st.metric("Faces detected", total_dets)
+            with col3:
+                st.metric("Frames with faces", f"{frames_with_faces}/{len(det_summary)}")
+
+            primary_id = analysis.get("primary_track_id")
+            if primary_id is not None:
+                st.info(f"📍 Primary subject: Track #{primary_id}")
+            else:
+                st.warning("⚠ No faces tracked, using center crop fallback")
+
+            # Render phase
+            with st.spinner("Rendering 9:16 reel at full resolution…"):
+                progress_placeholder.info("🎬 Rendering reel...")
+                reel_path = render_reel(tmp_vid, analysis)
+
+            # Extract still
+            with st.spinner("Extracting representative still frame…"):
+                still_path = extract_still(tmp_vid, analysis)
+
+            # Validation
             from src.validation import validate_video
-
             val = validate_video(reel_path)
             status = "✅" if val["ok"] else "❌"
+
             st.markdown(f"**Reel validation:** {status}")
             for c in val["checks"]:
                 icon = "✓" if c["passed"] else "✗"
                 st.text(f"  {icon} {c['name']}  {c.get('detail', '')}")
 
+            # Show outputs
+            st.subheader("Generated Reel")
             st.video(str(reel_path))
+
+            st.subheader("Representative Still")
+            st.image(str(still_path), use_container_width=True)
+
+            # Show crop path visualization
+            with st.expander("Crop path analysis"):
+                crop_path = analysis["crop_path"]
+                st.write(f"{len(crop_path)} keyframes in crop path")
+
+                # Simple time-series data
+                times = [p["time"] for p in crop_path[:50]]  # First 50 for display
+                focus_x = [p["focus_x"] for p in crop_path[:50]]
+                focus_y = [p["focus_y"] for p in crop_path[:50]]
+
+                st.line_chart({"focus_x": focus_x, "focus_y": focus_y})
+
+                with st.expander("Full analysis JSON"):
+                    st.json(analysis)
 
 st.divider()
 st.caption("Built for Hoichoi Hackathon 2026 — P4 Creative Reformatting Engine")
