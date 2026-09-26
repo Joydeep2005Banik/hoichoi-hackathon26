@@ -129,6 +129,32 @@ class SpeakerEstimator:
         self.switch_threshold = switch_threshold  # Hysteresis margin required to switch
         self.hold_frames = hold_frames  # Minimum frames to hold before switching unless strong evidence
 
+    def score_track(self, track: Track, audio_speech_score: float, img_w: int, img_h: int) -> float:
+        """Compute raw speaker score for a track."""
+        box = track.current_box
+        cx, cy = track.center
+
+        # Penalize detections in lower 25% of frame (hands/knees/clothing artifacts)
+        if cy > 0.75 * img_h:
+            return 0.02
+
+        area = max(0, box[2] - box[0]) * max(0, box[3] - box[1])
+        area_ratio = area / (img_w * img_h)
+        if area_ratio < 0.002:  # < 0.2% frame area
+            return 0.05
+
+        motion_val = min(1.0, track.recent_mouth_motion / 12.0)
+        size_boost = min(0.3, area_ratio * 6.0)
+        dist_from_center = abs(cx / img_w - 0.5)
+        center_boost = max(0.0, 0.2 * (1.0 - 2.0 * dist_from_center))
+
+        if audio_speech_score > 0.35:
+            score = (0.50 * motion_val) + (0.25 * audio_speech_score) + size_boost + center_boost
+        else:
+            score = (0.20 * motion_val) + size_boost + center_boost
+
+        return round(score, 3)
+
     def step(
         self,
         active_tracks: List[Track],
@@ -141,67 +167,45 @@ class SpeakerEstimator:
         if not active_tracks:
             return None, 0.0, {}
 
-        if len(active_tracks) == 1:
-            # Single visible person: immediately select as active speaker with confidence based on presence
-            track = active_tracks[0]
+        # Filter to tracks currently observed in this frame with plausible vertical position
+        valid_tracks = [t for t in active_tracks if t.missed_frames == 0 and t.center[1] <= 0.78 * img_h]
+        if not valid_tracks:
+            valid_tracks = [t for t in active_tracks if t.missed_frames <= 3 and t.center[1] <= 0.78 * img_h]
+            if not valid_tracks:
+                return None, 0.0, {}
+
+        scores = {t.id: self.score_track(t, audio_speech_score, img_w, img_h) for t in valid_tracks}
+
+        if len(valid_tracks) == 1:
+            track = valid_tracks[0]
             conf = 0.90 if audio_speech_score > 0.3 else 0.70
             self.active_track_id = track.id
             self.active_confidence = conf
-            return track.id, conf, {track.id: conf}
+            return track.id, conf, scores
 
-        scores: Dict[int, float] = {}
-        for track in active_tracks:
-            # 1. Mouth motion contribution (normalized ~0-1)
-            motion_val = min(1.0, track.recent_mouth_motion / 12.0)
-
-            # 2. Face size/prominence contribution (larger face in frame gets small boost)
-            box = track.current_box
-            area_ratio = ((box[2] - box[0]) * (box[3] - box[1])) / (img_w * img_h)
-            size_boost = min(0.3, area_ratio * 5.0)
-
-            # 3. Centrality boost
-            cx, cy = track.center
-            dist_from_center = abs(cx / img_w - 0.5)
-            center_boost = max(0.0, 0.2 * (1.0 - 2.0 * dist_from_center))
-
-            # Combined raw speaker score: audio acts as a gate for mouth motion
-            if audio_speech_score > 0.35:
-                score = (0.55 * motion_val) + (0.25 * audio_speech_score) + size_boost + center_boost
-            else:
-                # Little to no speech detected: fallback to prominence
-                score = (0.20 * motion_val) + size_boost + center_boost
-
-            scores[track.id] = round(score, 3)
-
-        # Find candidate with highest score
         best_track_id = max(scores, key=scores.get)
         best_score = scores[best_track_id]
 
-        # Second best score for confidence delta
         sorted_scores = sorted(scores.values(), reverse=True)
         margin = sorted_scores[0] - sorted_scores[1] if len(sorted_scores) > 1 else 1.0
 
-        # Hysteresis: prevent jittery rapid switching between two speakers
         self.frames_since_switch += 1
 
-        if self.active_track_id is None or self.active_track_id not in [t.id for t in active_tracks]:
-            # No current active speaker or previous track disappeared
+        if self.active_track_id is None or self.active_track_id not in [t.id for t in valid_tracks]:
             self.active_track_id = best_track_id
             self.active_confidence = round(min(1.0, best_score * 1.2), 2)
             self.frames_since_switch = 0
         else:
             current_score = scores.get(self.active_track_id, 0.0)
-            # Switch only if candidate exceeds current by switch_threshold OR hold time elapsed with higher score
             should_switch = (
                 (best_score > current_score + self.switch_threshold) or
-                (self.frames_since_switch > self.hold_frames and best_score > current_score + 0.1)
+                (self.frames_since_switch > self.hold_frames and best_score > current_score + 0.08)
             )
             if should_switch and best_track_id != self.active_track_id:
                 self.active_track_id = best_track_id
                 self.active_confidence = round(min(1.0, 0.5 + margin), 2)
                 self.frames_since_switch = 0
             else:
-                # Maintain active speaker, confidence reflects stability
                 self.active_confidence = round(min(1.0, 0.6 + (0.3 if audio_speech_score > 0.4 else 0.0)), 2)
 
         return self.active_track_id, self.active_confidence, scores

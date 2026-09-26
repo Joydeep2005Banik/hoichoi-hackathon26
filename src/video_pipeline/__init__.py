@@ -142,14 +142,17 @@ def analyse_video(
                 else:
                     target_cx, target_cy = 0.5, 0.5
             elif active_tracks:
-                # Ambiguous: use group center of all active faces
-                all_boxes = [t.current_box for t in active_tracks]
-                min_x = min(b[0] for b in all_boxes)
-                max_x = max(b[2] for b in all_boxes)
-                min_y = min(b[1] for b in all_boxes)
-                max_y = max(b[3] for b in all_boxes)
-                target_cx = (min_x + max_x) / 2 / src_w
-                target_cy = (min_y + max_y) / 2 / src_h
+                # Ambiguous: use group center of valid active faces
+                valid_boxes = [t.current_box for t in active_tracks if t.center[1] <= 0.78 * src_h]
+                if valid_boxes:
+                    min_x = min(b[0] for b in valid_boxes)
+                    max_x = max(b[2] for b in valid_boxes)
+                    min_y = min(b[1] for b in valid_boxes)
+                    max_y = max(b[3] for b in valid_boxes)
+                    target_cx = (min_x + max_x) / 2 / src_w
+                    target_cy = (min_y + max_y) / 2 / src_h
+                else:
+                    target_cx, target_cy = 0.5, 0.5
             else:
                 target_cx, target_cy = 0.5, 0.5
 
@@ -278,21 +281,33 @@ def _consolidate_speaker_segments(timeline: List[Dict]) -> List[Dict]:
 
 
 def _smooth_crop_path(path: List[Dict], window: int = 5) -> List[Dict]:
-    """Apply moving average smoothing to focus_x and focus_y."""
+    """Smooth crop path: prevents jitter while enabling clean, responsive speaker transitions."""
     if len(path) <= 1:
         return path
 
     smoothed = []
-    for i, point in enumerate(path):
-        start = max(0, i - window // 2)
-        end = min(len(path), i + window // 2 + 1)
+    cur_fx = path[0]["focus_x"]
+    cur_fy = path[0]["focus_y"]
 
-        fx_avg = sum(p["focus_x"] for p in path[start:end]) / (end - start)
-        fy_avg = sum(p["focus_y"] for p in path[start:end]) / (end - start)
+    for pt in path:
+        target_fx = pt["focus_x"]
+        target_fy = pt["focus_y"]
 
-        item = dict(point)
-        item["focus_x"] = round(fx_avg, 4)
-        item["focus_y"] = round(fy_avg, 4)
+        dist = abs(target_fx - cur_fx)
+        # Adaptive responsive transition: fast on speaker shifts, smooth on small drift
+        if dist > 0.15:
+            alpha = 0.55  # Fast 2-3 frame transition on speaker changes
+        elif dist > 0.05:
+            alpha = 0.40  # Moderate tracking movement
+        else:
+            alpha = 0.25  # Smooth small jitter within a shot
+
+        cur_fx = alpha * target_fx + (1.0 - alpha) * cur_fx
+        cur_fy = alpha * target_fy + (1.0 - alpha) * cur_fy
+
+        item = dict(pt)
+        item["focus_x"] = round(cur_fx, 4)
+        item["focus_y"] = round(cur_fy, 4)
         smoothed.append(item)
 
     return smoothed
