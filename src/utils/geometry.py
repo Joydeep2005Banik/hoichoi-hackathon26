@@ -17,6 +17,10 @@ def compute_crop_box(
 ) -> Tuple[int, int, int, int]:
     """Return (x1, y1, x2, y2) for the largest crop of ratio_w:ratio_h
     centered on the focus point (0-1 normalized)."""
+    # Defensive clamp: ensure focus coordinates are within valid [0.0, 1.0] range
+    focus_x = max(0.0, min(float(focus_x), 1.0))
+    focus_y = max(0.0, min(float(focus_y), 1.0))
+
     target_ratio = ratio_w / ratio_h
     src_ratio = img_w / img_h
 

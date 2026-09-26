@@ -354,7 +354,12 @@ def render_reel(
             break
 
         if frame_idx in focus_map:
-            last_fx, last_fy, last_spk, last_conf = focus_map[frame_idx]
+            raw_fx, raw_fy, last_spk, last_conf = focus_map[frame_idx]
+            # Defensive clamp: prevent invalid focus coordinates from causing out-of-bounds crops
+            # Only update last_fx/last_fy if the new values are valid (within bounds)
+            if 0.0 <= raw_fx <= 1.0 and 0.0 <= raw_fy <= 1.0:
+                last_fx, last_fy = raw_fx, raw_fy
+            # Otherwise, hold the last valid position
 
         x1, y1, x2, y2 = compute_crop_box(src_w, src_h, 9, 16, last_fx, last_fy)
 
@@ -380,13 +385,22 @@ def render_reel(
     cap.release()
     out.release()
 
-    # Re-encode with FFmpeg (mux audio if available)
-    wav_path = OUTPUTS_DIR / video_path.stem / f"{video_path.stem}.wav"
+    # Re-encode with FFmpeg (ensure web-friendly H.264 yuv420p + faststart + AAC audio muxing)
+    possible_wav_paths = [
+        video_path.parent / f"{video_path.stem}.wav",
+        OUTPUTS_DIR / video_path.stem / f"{video_path.stem}.wav",
+        video_path.with_suffix(".wav"),
+    ]
+    wav_path = next((p for p in possible_wav_paths if p.exists() and p.stat().st_size > 0), None)
+
     ffmpeg_cmd = ["ffmpeg", "-y", "-i", str(tmp_raw)]
-    if wav_path.exists():
-        ffmpeg_cmd.extend(["-i", str(wav_path), "-c:a", "aac", "-b:a", "128k"])
+    if wav_path:
+        ffmpeg_cmd.extend(["-i", str(wav_path), "-c:a", "aac", "-b:a", "128k", "-ar", "44100"])
     ffmpeg_cmd.extend([
-        "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+        "-c:v", "libx264",
+        "-preset", "fast",
+        "-crf", "23",
+        "-pix_fmt", "yuv420p",
         "-movflags", "+faststart",
         str(output_path)
     ])
@@ -395,7 +409,12 @@ def render_reel(
     if result.returncode != 0:
         print(f"Warning: FFmpeg mux returned error ({result.stderr}). Re-trying video-only encode...")
         subprocess.run(
-            ["ffmpeg", "-y", "-i", str(tmp_raw), "-c:v", "libx264", "-preset", "fast", "-crf", "23", str(output_path)],
+            [
+                "ffmpeg", "-y", "-i", str(tmp_raw),
+                "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+                "-pix_fmt", "yuv420p", "-movflags", "+faststart",
+                str(output_path)
+            ],
             capture_output=True,
         )
 
