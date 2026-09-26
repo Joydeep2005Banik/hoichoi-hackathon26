@@ -31,11 +31,9 @@ with tab_img:
             with st.spinner("Detecting subjects & generating crops…"):
                 results = process_image(tmp_path)
 
-            # Count ready assets
             ready_count = sum(1 for r in results.values() if r["ready"])
             st.success(f"Generated {len(results)} variants · {ready_count} ready")
 
-            # Detection summary
             first_meta = next(iter(results.values()))["metadata"]
             subjects = first_meta["detected_subjects"]
             n_faces = sum(1 for s in subjects if s["category"] == "face")
@@ -52,7 +50,6 @@ with tab_img:
                 crop_box = meta["crop_box"]
                 ready = data["ready"]
 
-                # Status badge
                 if val["status"] == "PASS":
                     status_badge = "✅ PASS"
                     status_color = "green"
@@ -69,7 +66,6 @@ with tab_img:
                 with col2:
                     st.markdown(f"**Validation:** :{status_color}[{status_badge}]")
 
-                    # Show all checks with severity
                     for c in val["checks"]:
                         icon = "✓" if c["passed"] else "✗"
                         severity = c.get("severity", "info")
@@ -77,18 +73,15 @@ with tab_img:
                         detail = f" — {c['detail']}" if c.get("detail") else ""
                         st.text(f"  {icon} {c['name']} {sev_badge}{detail}")
 
-                    # Warnings
                     if val["warnings"]:
                         st.markdown("**Warnings:**")
                         for w in val["warnings"]:
                             st.warning(f"{w['message']}: {w.get('detail', '')}", icon="⚠️")
 
-                    # Metrics
                     if val["metrics"]:
                         with st.expander("Metrics"):
                             st.json(val["metrics"])
 
-                    # Crop box
                     st.markdown("**Crop box**")
                     st.text(
                         f"  ({crop_box['x1']}, {crop_box['y1']}) → "
@@ -96,7 +89,6 @@ with tab_img:
                         f"  {meta['crop_size']['w']}×{meta['crop_size']['h']}"
                     )
 
-                    # Face visibility
                     face_vis = meta.get("face_visibility", [])
                     if face_vis:
                         vis_count = sum(face_vis)
@@ -116,12 +108,12 @@ with tab_vid:
 
         st.video(str(tmp_vid))
 
-        # Configuration
+        # Configuration & Debug Options
         col1, col2 = st.columns(2)
         with col1:
             sample_fps = st.slider("Analysis sample rate (FPS)", 2.0, 10.0, 4.5, 0.5)
         with col2:
-            smoothing = st.slider("Crop smoothing window", 3, 15, 5, 2)
+            debug_mode = st.checkbox("🔍 Debug Overlay Mode (show face boxes, speaker IDs & crop window)", value=False)
 
         if st.button("Generate 9:16 Reel", key="gen_vid"):
             from src.video_pipeline import analyse_video, render_reel, extract_still
@@ -130,16 +122,17 @@ with tab_vid:
 
             # Analysis phase
             progress_placeholder = st.empty()
-            with st.spinner("Analyzing video (face detection + tracking)…"):
-                progress_placeholder.info("🔍 Detecting faces on sampled frames...")
+            with st.spinner("Analyzing video (active-speaker detection + tracking)…"):
+                progress_placeholder.info("🔍 Detecting faces, tracking mouth motion & speech activity...")
                 analysis = analyse_video(tmp_vid, sample_fps=sample_fps, cache_path=cache)
 
             # Show analysis summary
             meta = analysis["metadata"]
+            audio_tag = "🔊 Audio Speech VAD Enabled" if meta.get("audio_detected") else "🔇 Video Only"
             st.success(
                 f"Analyzed {meta['total_frames']} frames "
                 f"({meta['duration_sec']:.1f}s @ {meta['fps']:.1f} FPS) · "
-                f"sampled at ~{meta['sample_fps']:.1f} FPS"
+                f"sampled at ~{meta['sample_fps']:.1f} FPS · {audio_tag}"
             )
 
             # Detection summary
@@ -157,14 +150,22 @@ with tab_vid:
 
             primary_id = analysis.get("primary_track_id")
             if primary_id is not None:
-                st.info(f"📍 Primary subject: Track #{primary_id}")
+                st.info(f"📍 Primary active speaker: Track #{primary_id}")
             else:
-                st.warning("⚠ No faces tracked, using center crop fallback")
+                st.warning("⚠ No clear primary speaker, using conversational group crop")
+
+            # Speaker segments table
+            speaker_segments = analysis.get("speaker_segments", [])
+            if speaker_segments:
+                with st.expander(f"🗣 Speaker Segments ({len(speaker_segments)} segments)", expanded=True):
+                    for seg in speaker_segments:
+                        spk_lbl = f"Track #{seg['speaker_track_id']}" if seg['speaker_track_id'] is not None else "Group/Silence"
+                        st.text(f"  • {seg['start_time']:.1f}s – {seg['end_time']:.1f}s: {spk_lbl} (avg confidence: {seg['avg_confidence']:.2f})")
 
             # Render phase
             with st.spinner("Rendering 9:16 reel at full resolution…"):
                 progress_placeholder.info("🎬 Rendering reel...")
-                reel_path = render_reel(tmp_vid, analysis)
+                reel_path = render_reel(tmp_vid, analysis, debug_overlay=debug_mode)
 
             # Extract still
             with st.spinner("Extracting representative still frame…"):
@@ -181,22 +182,22 @@ with tab_vid:
                 st.text(f"  {icon} {c['name']}  {c.get('detail', '')}")
 
             # Show outputs
-            st.subheader("Generated Reel")
+            st.subheader("Generated Reel" + (" (Debug Overlay)" if debug_mode else ""))
             st.video(str(reel_path))
 
             st.subheader("Representative Still")
             st.image(str(still_path), use_container_width=True)
 
-            # Show crop path visualization
-            with st.expander("Crop path analysis"):
+            # Show crop path & sidecar files
+            with st.expander("Sidecar files & Crop path"):
+                st.write(f"Speaker segments sidecar: `{analysis.get('speaker_segments_path')}`")
+                st.write(f"Crop path sidecar: `{analysis.get('crop_path_path')}`")
+
                 crop_path = analysis["crop_path"]
                 st.write(f"{len(crop_path)} keyframes in crop path")
 
-                # Simple time-series data
-                times = [p["time"] for p in crop_path[:50]]  # First 50 for display
-                focus_x = [p["focus_x"] for p in crop_path[:50]]
-                focus_y = [p["focus_y"] for p in crop_path[:50]]
-
+                focus_x = [p["focus_x"] for p in crop_path[:60]]
+                focus_y = [p["focus_y"] for p in crop_path[:60]]
                 st.line_chart({"focus_x": focus_x, "focus_y": focus_y})
 
                 with st.expander("Full analysis JSON"):
