@@ -38,7 +38,7 @@ tests/                  ← pytest suite
 
 ## Key Design Decisions
 1. **Proxy analysis** — detect at ≤ 480p, map ROI back to source res.
-2. **Detection cascade** — MediaPipe Face → Haar fallback → saliency center.
+2. **Detection cascade** — MediaPipe Face → Haar fallback → saliency/previous-track fallback.
 3. **Speaker tracking** — per-frame face positions + audio RMS/VAD + lightweight mouth-motion analysis → estimate active speaker per segment; smooth crop window across frames.
 4. **Multi-person rule** — never lock crop to frame-0 positions; re-evaluate every N frames.
 5. **Validation contract** — `validate_asset(path) → {ok: bool, checks: [...]}` runs before any file enters the output library.
