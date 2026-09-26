@@ -37,7 +37,7 @@ Every generated asset passes machine-readable validation checks (resolution, asp
 
 ## Key Features
 
-- **Subject-Aware Image Cropping**: Detects faces and subjects via lightweight CPU cascade (YuNet → Haar → saliency) and computes mathematically exact crops anchored on detected subjects
+- **Subject-Aware Image Cropping**: Detects faces and subjects via a lightweight CPU cascade (OpenCV YuNet → Haar → Sobel Saliency) and computes mathematically exact crops anchored on detected subjects
 - **Multiple Aspect Ratios**: Generates 16:9 (landscape), 1:1 (square), 4:5 (portrait), and 9:16 (vertical) variants from a single input
 - **Multi-Person Video Tracking**: IoU-based tracking maintains subject identity across detection gaps and occlusions
 - **Active-Speaker Estimation**: Combines audio VAD (voice activity detection via RMS energy), mouth-region motion tracking, and temporal hysteresis to estimate the active speaker per sample segment
@@ -51,46 +51,36 @@ Every generated asset passes machine-readable validation checks (resolution, asp
 
 ## System Architecture
 
-### Image Pipeline
-```
-Master Image
-    ↓
-Proxy Analysis (≤480p)
-    ↓
-Subject Detection (YuNet → Haar → Saliency)
-    ↓
-Weighted Focus Computation
-    ↓
-Multi-Ratio Crop Generation (16:9, 1:1, 4:5, 9:16)
-    ↓
-Validation & QA Checks
-    ↓
-Gallery + Download
+### Image Processing Pipeline
+```mermaid
+flowchart TD
+    A[Master Image] --> B[Proxy Setup ≤480p]
+    B --> C[Detection Cascade: YuNet / Haar / Saliency]
+    C --> D[Subject Importance Scoring]
+    D --> E[Weighted Focus Calculation]
+    E --> F[Multi-Ratio Crop Calculation: 16:9, 1:1, 4:5, 9:16]
+    F --> G[Full-Resolution Extraction & Safe Margin Nudge]
+    G --> H[Automated QA Validation]
+    H --> I[Validated Formatted Assets + Metadata JSON]
 ```
 
-### Video Pipeline
-```
-Master Video
-    ↓
-Audio Extraction & VAD (RMS Energy)
-    ↓
-Proxy Analysis (~4.5 FPS sampling at ≤480p)
-    ↓
-Face Detection (YuNet)
-    ↓
-IoU-based Tracking + Mouth Motion Extraction
-    ↓
-Active Speaker Estimation (audio + visual cues + temporal hysteresis)
-    ↓
-Crop Path Computation (target active speaker or group center)
-    ↓
-Temporal Smoothing (adaptive alpha EMA)
-    ↓
-Full-Resolution Rendering (FFmpeg H.264 + AAC)
-    ↓
-Validation & QA Checks
-    ↓
-9:16 Reel + Still + Analysis View + Download
+### Video Processing Pipeline
+```mermaid
+flowchart TD
+    A[Master Video] --> B1[Audio Extraction: WAV]
+    A --> B2[Video Proxy Setup: ≤480p @ ~4.5 FPS]
+    B1 --> C1[Audio VAD: RMS Energy Windows]
+    B2 --> C2[Face Detection: YuNet ONNX]
+    C2 --> D[IoU-Based Tracking]
+    D --> E[Mouth-Region Motion Analysis]
+    C1 --> F[Active Speaker Estimation]
+    E --> F
+    F --> G[Dynamic Focus Path]
+    G --> H[Adaptive EMA Temporal Smoothing]
+    H --> I[Full-Resolution 9:16 Extraction]
+    I --> J[FFmpeg H.264 / AAC Muxing]
+    J --> K[QA Validation: 1080x1920 Stream Check]
+    K --> L[9:16 Reel + Still + Sidecar JSONs]
 ```
 
 ---
@@ -99,11 +89,11 @@ Validation & QA Checks
 
 1. **Proxy Detection**: Resizes input to ≤480p proxy resolution for lightweight face/subject detection
 2. **Detection Cascade**:
-   - **YuNet Face Detection** (primary): CNN-based face detector optimized for CPU inference
-   - **Haar Cascade** (fallback): Classical face detection when YuNet produces no detections
-   - **Saliency Maps** (fallback): Spectral residual saliency when no faces are detected
-3. **Subject Scoring**: Assigns importance scores based on detection confidence, face category priority, and spatial position
-4. **Weighted Focus**: Computes normalized focus point `(focus_x, focus_y)` as the weighted centroid of detected subjects
+   - **OpenCV YuNet Face Detection** (primary): Lightweight CNN face detector (~230KB ONNX) executed via OpenCV DNN (`cv2.FaceDetectorYN`)
+   - **Haar Cascade** (fallback): Classical Haar frontal face detection when YuNet produces no detections
+   - **Sobel Saliency** (fallback): Gradient-magnitude energy saliency when no faces are detected
+3. **Subject Scoring**: Assigns importance scores based on category weight (faces prioritized over saliency), detection confidence, relative area, and centrality
+4. **Weighted Focus**: Computes normalized focus point `(focus_x, focus_y)` as the importance-weighted center of mass of detected subjects
 5. **Subject-Aware Crop**: For each target aspect ratio, computes the largest inscribed crop centered on the focus point, then nudges the crop window to maximize subject visibility
 6. **Validation**: Runs dimension checks, aspect ratio tolerance, subject visibility ratio, safe margin compliance, and metadata consistency before marking asset as ready
 
@@ -112,11 +102,11 @@ Validation & QA Checks
 ## Video Processing Pipeline
 
 1. **Audio Extraction**: Uses FFmpeg to extract mono WAV audio stream for voice activity detection
-2. **Voice Activity Detection (VAD)**: Computes RMS energy over 100ms windows; speech segments are identified by RMS threshold
-3. **Proxy Sampling**: Analyzes video at reduced resolution (≤480p) and reduced temporal rate (~4-5 FPS sampling) to minimize computational load
-4. **Face Detection**: Applies YuNet face detection on each sampled proxy frame
+2. **Voice Activity Detection (VAD)**: Computes RMS energy over 100ms sliding windows; speech segments are identified by RMS thresholding
+3. **Proxy Sampling**: Analyzes video at reduced resolution (≤480p) and sampled temporal rate (~4.5 FPS) to minimize computational overhead
+4. **Face Detection**: Applies OpenCV YuNet face detection on each sampled proxy frame
 5. **IoU-Based Tracking**: Maintains persistent track IDs across frames using Intersection-over-Union matching with configurable IOU threshold (0.3) and maximum age (30 frames)
-6. **Mouth Motion Tracking**: Extracts mouth region from each tracked face and computes inter-frame pixel differences to estimate mouth activity
+6. **Mouth Motion Tracking**: Extracts mouth region from each tracked face on gray frames and computes inter-frame pixel difference metrics to estimate speech motion
 7. **Active Speaker Estimation**:
    - Combines **audio speech score** (from VAD) and **visual mouth motion** into a composite speaker score per track
    - Applies **temporal hysteresis** (hold frames = 8) to prevent flickering on ambiguous or rapid speaker switches
@@ -132,8 +122,8 @@ Validation & QA Checks
 10. **Full-Resolution Rendering**:
     - Reads source video at full resolution (1920×1080 typical)
     - Applies smoothed crop path frame-by-frame to extract 9:16 vertical windows
-    - Resizes to 1080×1920 target resolution (INTER_AREA interpolation)
-    - Re-encodes with **FFmpeg**: H.264 (libx264, preset=fast, CRF=23, yuv420p, faststart) + AAC audio (128k, 44.1kHz)
+    - Resizes to 1080×1920 target resolution (`cv2.INTER_AREA` interpolation)
+    - Re-encodes with **FFmpeg**: H.264 (`libx264`, preset=fast, CRF=23, `pix_fmt=yuv420p`, `movflags=+faststart`) + AAC audio (128k, 44.1kHz)
 11. **Representative Still Extraction**: Picks the frame with highest speaker confidence (or middle frame if no speaker) and extracts 9:16 crop as JPEG
 12. **Validation**: Validates 9:16 reel for correct resolution (1080×1920), aspect ratio tolerance, frame integrity, and playback compatibility
 13. **Sidecar Generation**: Produces machine-readable JSON files:
@@ -198,9 +188,8 @@ Each asset produces a structured JSON validation report:
 
 - **Python 3.14**: Core runtime
 - **Streamlit**: Interactive web UI and deployment
-- **OpenCV (opencv-python-headless)**: Image/video I/O, frame manipulation, classical CV algorithms
+- **OpenCV (`opencv-python-headless`)**: Image/video I/O, frame manipulation, YuNet ONNX face detector, classical CV algorithms
 - **NumPy**: Numerical operations, array processing
-- **MediaPipe**: YuNet face detection model (CPU-optimized)
 - **Pillow**: Image format handling
 - **FFmpeg**: Video transcoding, audio extraction, H.264/AAC encoding
 - **pytest**: Test suite (76 unit/integration tests)
@@ -222,13 +211,13 @@ hoichoi-hackathon26/
 ├── src/
 │   ├── image_pipeline/         # Image multi-crop generation
 │   ├── video_pipeline/         # Video analysis & reel rendering
-│   ├── detection/              # Subject/face detection (YuNet, Haar, saliency)
+│   ├── detection/              # Subject/face detection (YuNet, Haar, Saliency)
 │   ├── tracking/               # IoU-based tracking, speaker estimation
 │   ├── audio/                  # Audio extraction, VAD, RMS energy
 │   ├── validation/             # Asset QA checks
 │   ├── media/                  # I/O helpers, FFmpeg wrappers
 │   └── utils/                  # Geometry, config, constants
-├── tests/                      # Pytest suite (unit + integration tests)
+├── tests/                      # Pytest suite (76 unit + integration tests)
 ├── assets/                     # Sample inputs (images, small videos)
 ├── models/                     # YuNet face detection model weights (gitignored)
 └── outputs/                    # Generated crops/reels (gitignored)
@@ -350,5 +339,4 @@ The following enhancements are planned for future iterations:
 - **Advanced Crop Strategies**: Add rule-based crop modes (e.g., "always follow leftmost speaker", "group shot only") selectable in the UI
 
 ---
-
 
