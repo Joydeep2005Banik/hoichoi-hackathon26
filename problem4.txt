@@ -1,0 +1,5 @@
+- Problem 4 — Creative Reformatting Engine
+    
+    *Track: Media Pipeline / Computer Vision*
+    
+    A media pipeline that takes one master image and/or video for a title and produces every platform-ready ratio (16:9, 1:1, 9:16, 4:5) with subject-aware smart crop, a still pulled cleanly from video, and a subject-tracked, active-speaker-aware vertical reel — every derived asset validated against a machine-readable platform spec before it enters the library.
