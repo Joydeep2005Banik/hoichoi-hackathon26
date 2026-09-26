@@ -351,10 +351,4 @@ The following enhancements are planned for future iterations:
 
 ---
 
-## License
 
-This project is built for the Hoichoi Hackathon 2026 and does not currently include an open-source license. Please contact the repository owner for usage permissions.
-
----
-
-**Built for Hoichoi Hackathon 2026 · Problem 4 — Creative Reformatting Engine**
